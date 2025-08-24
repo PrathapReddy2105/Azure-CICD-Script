@@ -1,0 +1,502 @@
+#IMPORTED REPOSITORIES USED BY THIS TEMPLATE
+resources:
+  repositories:
+  - repository: repo_deployment_scripts
+    type: git    
+    name: Mulesoft
+    ref: develop
+
+#Parameters used by this template. These values can be overwritten by the caller pipeline.
+parameters:
+- name: appName
+  type: string
+  default: ''
+- name: hostUrl
+  type: string
+  default: ''  
+- name: SQAppKey
+  type: string
+  default: ''
+
+#Dev environment specific parameters
+- name: dev_vCores
+  type: number
+  default: 0.1
+- name: dev_replicas
+  type: number
+  default: 1
+- name: dev_clustered
+  type: boolean
+  default: false
+- name: dev_generateDefaultPublicUrl
+  type: boolean
+  default: true
+- name: dev_runtime
+  type: string
+  default: "4.9.8"
+- name: dev_releaseChannel
+  type: string
+  default: "LTS"
+- name: dev_javaVersion
+  type: string
+  default: "17"
+- name: dev_tracingEnabled
+  type: boolean
+  default: true
+
+#QA environment specific parameters
+- name: qa_vCores
+  type: number
+  default: 0.1
+- name: qa_replicas
+  type: number
+  default: 1
+- name: qa_clustered
+  type: boolean
+  default: false
+- name: qa_generateDefaultPublicUrl
+  type: boolean
+  default: true
+- name: qa_runtime
+  type: string
+  default: "4.9.8"
+- name: qa_releaseChannel
+  type: string
+  default: "LTS"
+- name: qa_javaVersion
+  type: string
+  default: "17"
+- name: qa_tracingEnabled
+  type: boolean
+  default: true
+
+#Stage environment specific parameters
+- name: stage_vCores
+  type: number
+  default: 0.1
+- name: stage_replicas
+  type: number
+  default: 1
+- name: stage_clustered
+  type: boolean
+  default: false
+- name: stage_generateDefaultPublicUrl
+  type: boolean
+  default: true
+- name: stage_runtime
+  type: string
+  default: "4.9.8"
+- name: stage_releaseChannel
+  type: string
+  default: "LTS"
+- name: stage_javaVersion
+  type: string
+  default: "17"
+- name: stage_tracingEnabled
+  type: boolean
+  default: true
+
+#Production environment specific parameters
+- name: prod_vCores
+  type: number
+  default: 0.1
+- name: prod_replicas
+  type: number
+  default: 2
+- name: prod_clustered
+  type: boolean
+  default: false
+- name: prod_generateDefaultPublicUrl
+  type: boolean
+  default: true
+- name: prod_runtime
+  type: string
+  default: "4.9.8"
+- name: prod_releaseChannel
+  type: string
+  default: "LTS"
+- name: prod_javaVersion
+  type: string
+  default: "17"
+- name: prod_tracingEnabled
+  type: boolean
+  default: true
+  
+- name: mainBranchPattern
+  type: string
+  default: "refs/heads/main"
+- name: releaseBranchPattern
+  type: string
+  default: "refs/heads/releases/"  
+
+#Variables used by this template
+variables:
+  - name: MAVEN_CACHE_FOLDER
+    value: $(Pipeline.Workspace)/.m2/repository
+  - name: MAVEN_OPTS
+    value: '--settings $(Agent.TempDirectory)/settings.xml -Dmaven.repo.local=$(MAVEN_CACHE_FOLDER) -B -ntp -e'
+  - name: major
+    value: 1
+  - name: minor
+    ${{ if and(ne(variables['Build.Reason'], 'PullRequest'), ne(parameters.appName, ''), or(startsWith(variables['Build.SourceBranch'], parameters.mainBranchPattern), startsWith(variables['Build.SourceBranch'], parameters.releaseBranchPattern))) }}:
+      value: $[counter(format('{0}-{1}', '${{ parameters.appName }}', variables['major']), 0)]
+    ${{ else }}:
+      value: 0
+  - name: POM_VERSION
+    ${{ if and(ne(variables['Build.Reason'], 'PullRequest'), ne(parameters.appName, ''), or(startsWith(variables['Build.SourceBranch'], parameters.mainBranchPattern), startsWith(variables['Build.SourceBranch'], parameters.releaseBranchPattern))) }}:
+      value: "$(major).0.$(minor)"
+    ${{ else }}:
+      value: "1.0.0-SNAPSHOT"      
+
+#Notes: 
+  # Define all variables in Variable Group as upper case and using _ as separator 
+  # Define the following Azure environments: MuleSoft-CH20-Anypoint-Exchange, MuleSoft-CH20-Dev, MuleSoft-CH20-Stage, and MuleSoft-CH20-Prod 
+  # Configure "Approvals and checks" to ensure deployment to Stage and Production only triggers after approval
+stages:
+  - stage: pre_check
+    displayName: Pre-Check
+    jobs:
+      - job: validate_required_params
+        displayName: Validate Required Parameters
+        steps:
+          - bash: |
+              echo "appName parameters value: ${{ parameters.appName }}" 
+              if [ -z "${{ parameters.appName }}" ]; then
+                echo "appName parameter is required."
+                exit 1
+              fi          
+            condition: eq(variables['Build.Reason'], 'PullRequest')
+            displayName: Validate appName parameter
+      - job: update_build_name
+        dependsOn: validate_required_params
+        displayName: Update Build Name
+        steps: 
+          - bash: echo "##vso[build.updatebuildnumber]PR Build Validation"
+            #condition: eq(variables['Build.Reason'], 'PullRequest')
+            displayName: Update Build Name when PR
+          - bash: echo "##vso[build.updatebuildnumber]$(Build.BuildNumber)_ARTIFACT_VERSION=${{ variables.POM_VERSION }}"
+            condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+            displayName: Update Build Name when NOT PR
+
+  - stage: build
+    displayName: Build Application
+    dependsOn: pre_check
+    #condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    condition: succeeded()
+    jobs:
+      - job: build
+        displayName: Build Application
+        steps:
+          - task: DownloadSecureFile@1
+            inputs:
+              secureFile: 'settings.xml'
+          - task: Cache@2
+            inputs:
+              key: 'maven'
+              path: $(MAVEN_CACHE_FOLDER)
+            displayName: Cache Maven local repo
+          - task: Maven@3
+            inputs:
+              options: "$(MAVEN_OPTS)"
+              mavenPomFile: 'pom.xml'
+              mavenOptions: '-Xmx3072m'
+              javaHomeOption: 'JDKVersion'
+              jdkVersionOption: '17'
+              jdkArchitectureOption: 'x64'
+              publishJUnitResults: true
+              testResultsFiles: '**/surefire-reports/TEST-*.xml'
+              goals: 'clean package'
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)      
+
+  - stage: deploy_exchange
+    displayName: Deploy to Exchange
+    dependsOn: build
+    #condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    condition: succeeded()
+    jobs:
+      - deployment: deploy_exchange
+        displayName: Deploy to Exchange
+        pool:
+          vmImage: 'Ubuntu-latest'
+        environment: 'MuleSoft-CH20-Anypoint-Exchange' 
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - task: Cache@2
+                  inputs:
+                    key: 'maven'
+                    path: $(MAVEN_CACHE_FOLDER)
+                  displayName: Cache Maven local repo
+                - task: DownloadSecureFile@1
+                  inputs:
+                    secureFile: 'settings.xml'
+                - task: Maven@3
+                  displayName: "Updating pom.xml version to $(POM_VERSION)"
+                  inputs:
+                    jdkVersionOption: '17'
+                    jdkArchitectureOption: 'x64'
+                    options: '$(MAVEN_OPTS) -DskipTests=true'
+                    goals: "versions:set -DnewVersion=$(POM_VERSION)"
+                  env:
+                    SYSTEM_ACCESSTOKEN: $(System.AccessToken)        
+                - task: Maven@3
+                  displayName: 'Deploy into Exchange'
+                  inputs:
+                    jdkVersionOption: '17'
+                    jdkArchitectureOption: 'x64'
+                    goals: 'deploy'
+                    options: '$(MAVEN_OPTS) -DskipTests=true'
+                    publishJUnitResults: false
+                  env:
+                    SYSTEM_ACCESSTOKEN: $(System.AccessToken)      
+
+                - task: Bash@3
+                  displayName: "Copying pom.xml and pom.properties to target folder" 
+                  inputs:
+                    targetType: inline
+                    script: |
+                      find ./target/META-INF/maven -name "pom.*" -print0 | while read -d $'\0' file
+                      do
+                        cp "$file" ./target/
+                      done
+                - task: CopyFiles@2 
+                  displayName: "Staging Files to: $(Build.ArtifactStagingDirectory)" 
+                  inputs: 
+                    SourceFolder: '$(System.DefaultWorkingDirectory)' 
+                    Contents: | 
+                      **/target/*.jar
+                      **/target/pom.*
+                    TargetFolder: '$(Build.ArtifactStagingDirectory)' 
+                - task: PublishPipelineArtifact@1
+                  displayName: Publish 
+                  inputs: 
+                    targetPath: $(Build.ArtifactStagingDirectory)        
+                    artifact: drop
+                    publishLocation: 'pipeline'
+
+  - stage: deploy_dev
+    displayName: Deploy to Dev
+    dependsOn: deploy_exchange
+    #condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    condition: succeeded()
+    variables:
+      - group: MuleSoft-CH20-Dev
+      - name: APP_NAME
+        value: ${{ parameters.appName }}-dev
+      - name: DEPLOY_REPLICAS
+        value: ${{ parameters.dev_replicas }}
+      - name: DEPLOY_VCORES
+        value: ${{ parameters.dev_vCores }}
+      - name: DEPLOY_CLUSTERED
+        value: ${{ parameters.dev_clustered }}
+      - name: DEPLOY_GENERATE_DEFAULT_PUBLIC_URL
+        value: ${{ parameters.dev_generateDefaultPublicUrl }}
+      - name: DEPLOY_RUNTIME
+        value: ${{ parameters.dev_runtime }}
+      - name: DEPLOY_RELEASE_CHANNEL
+        value: ${{ parameters.dev_releaseChannel }}
+      - name: DEPLOY_JAVA_VERSION
+        value: ${{ parameters.dev_javaVersion }}
+      - name: DEPLOY_TRACING_ENABLED
+        value: ${{ parameters.dev_tracingEnabled }}
+    jobs:
+      - deployment: deploy_dev
+        displayName: Deploy to Dev
+        pool:
+          vmImage: 'Ubuntu-latest'
+        environment: 'MuleSoft-CH20-Dev' 
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: repo_deployment_scripts
+                - download: current
+                  artifact: drop
+                  patterns: "**/pom.properties"
+                - task: Bash@3
+                  displayName: "Running deployment script from repo" 
+                  inputs:
+                   # filePath: "./scripts/deployments/mulesoft_deploy_to_ch20.sh"
+                    filePath: "./cicd/mulesoft_deploy_to_ch20.sh"
+                  env:
+                    MULE_KEY: $(MULE_KEY)
+                    CONNECTED_APP_CLIENT_ID: $(CONNECTED_APP_CLIENT_ID)
+                    CONNECTED_APP_CLIENT_SECRET: $(CONNECTED_APP_CLIENT_SECRET)
+                    ANYPOINT_CLIENT_ID: $(ANYPOINT_CLIENT_ID)
+                    ANYPOINT_CLIENT_SECRET: $(ANYPOINT_CLIENT_SECRET)
+  - stage: deploy_qa
+    displayName: Deploy to Qa
+    dependsOn: deploy_dev
+    #condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    condition: succeeded()
+    variables:
+      - group: MuleSoft-CH20-Qa
+      - name: APP_NAME
+        value: ${{ parameters.appName }}-qa
+      - name: DEPLOY_REPLICAS
+        value: ${{ parameters.qa_replicas }}
+      - name: DEPLOY_VCORES
+        value: ${{ parameters.qa_vCores }}
+      - name: DEPLOY_CLUSTERED
+        value: ${{ parameters.qa_clustered }}
+      - name: DEPLOY_GENERATE_DEFAULT_PUBLIC_URL
+        value: ${{ parameters.qa_generateDefaultPublicUrl }}
+      - name: DEPLOY_RUNTIME
+        value: ${{ parameters.qa_runtime }}
+      - name: DEPLOY_RELEASE_CHANNEL
+        value: ${{ parameters.qa_releaseChannel }}
+      - name: DEPLOY_JAVA_VERSION
+        value: ${{ parameters.qa_javaVersion }}
+      - name: DEPLOY_TRACING_ENABLED
+        value: ${{ parameters.qa_tracingEnabled }}
+    jobs:
+      - deployment: deploy_Qa
+        displayName: Deploy to Qa
+        pool:
+          vmImage: 'Ubuntu-latest'
+        environment: 'MuleSoft-CH20-Qa' 
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: repo_deployment_scripts
+                - download: current
+                  artifact: drop
+                  patterns: "**/pom.properties"
+                - task: Bash@3
+                  displayName: "Running deployment script from repo" 
+                  inputs:
+                   # filePath: "./scripts/deployments/mulesoft_deploy_to_ch20.sh"
+                    filePath: "./cicd/mulesoft_deploy_to_ch20.sh"
+                  env:
+                    MULE_KEY: $(MULE_KEY)
+                    CONNECTED_APP_CLIENT_ID: $(CONNECTED_APP_CLIENT_ID)
+                    CONNECTED_APP_CLIENT_SECRET: $(CONNECTED_APP_CLIENT_SECRET)
+                    ANYPOINT_CLIENT_ID: $(ANYPOINT_CLIENT_ID)
+                    ANYPOINT_CLIENT_SECRET: $(ANYPOINT_CLIENT_SECRET)
+
+  - stage: deploy_stage
+    displayName: Deploy to Stage
+    dependsOn: deploy_qa
+    #condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    condition: succeeded()
+   # condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'), or(
+    #      eq(variables['System.PullRequest.TargetBranch'], 'refs/heads/main'),
+    #      startsWith(variables['System.PullRequest.TargetBranch'], 'refs/heads/release/')
+     #   )
+     # )
+    variables:
+      - group: MuleSoft-CH20-Stage
+      - name: APP_NAME
+        value: ${{ parameters.appName }}-stage
+      - name: DEPLOY_REPLICAS
+        value: ${{ parameters.stage_replicas }}
+      - name: DEPLOY_VCORES
+        value: ${{ parameters.stage_vCores }}
+      - name: DEPLOY_CLUSTERED
+        value: ${{ parameters.stage_clustered }}
+      - name: DEPLOY_GENERATE_DEFAULT_PUBLIC_URL
+        value: ${{ parameters.stage_generateDefaultPublicUrl }}
+      - name: DEPLOY_RUNTIME
+        value: ${{ parameters.stage_runtime }}
+      - name: DEPLOY_RELEASE_CHANNEL
+        value: ${{ parameters.stage_releaseChannel }}
+      - name: DEPLOY_JAVA_VERSION
+        value: ${{ parameters.stage_javaVersion }}
+      - name: DEPLOY_TRACING_ENABLED
+        value: ${{ parameters.stage_tracingEnabled }}
+    jobs:
+      - deployment: deploy_stage
+        displayName: Deploy to Stage
+        pool:
+          vmImage: 'Ubuntu-latest'
+        environment: 'MuleSoft-CH20-Stage' 
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: repo_deployment_scripts
+                - download: current
+                  artifact: drop
+                  patterns: "**/pom.properties"
+                - task: Bash@3
+                  displayName: "Running deployment script from repo" 
+                  inputs:
+                   # filePath: "./scripts/deployments/mulesoft_deploy_to_ch20.sh"
+                    filePath: "./cicd/mulesoft_deploy_to_ch20.sh"
+                  env:
+                    MULE_KEY: $(MULE_KEY)
+                    CONNECTED_APP_CLIENT_ID: $(CONNECTED_APP_CLIENT_ID)
+                    CONNECTED_APP_CLIENT_SECRET: $(CONNECTED_APP_CLIENT_SECRET)
+                    ANYPOINT_CLIENT_ID: $(ANYPOINT_CLIENT_ID)
+                    ANYPOINT_CLIENT_SECRET: $(ANYPOINT_CLIENT_SECRET)
+
+  - stage: release_prod
+    displayName: Production Release
+    dependsOn: deploy_stage
+    #condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+    condition: succeeded()
+    variables:
+      - group: MuleSoft-CH20-Prod
+      - name: APP_NAME
+        value: ${{ parameters.appName }}
+      - name: DEPLOY_REPLICAS
+        value: ${{ parameters.prod_replicas }}
+      - name: DEPLOY_VCORES
+        value: ${{ parameters.prod_vCores }}
+      - name: DEPLOY_CLUSTERED
+        value: ${{ parameters.prod_clustered }}
+      - name: DEPLOY_GENERATE_DEFAULT_PUBLIC_URL
+        value: ${{ parameters.prod_generateDefaultPublicUrl }}
+      - name: DEPLOY_RUNTIME
+        value: ${{ parameters.prod_runtime }}
+      - name: DEPLOY_RELEASE_CHANNEL
+        value: ${{ parameters.prod_releaseChannel }}
+      - name: DEPLOY_JAVA_VERSION
+        value: ${{ parameters.prod_javaVersion }}
+      - name: DEPLOY_TRACING_ENABLED
+        value: ${{ parameters.prod_tracingEnabled }}
+    jobs:
+      - deployment: deploy_prod
+        displayName: Deploy to Production
+        pool:
+          vmImage: 'Ubuntu-latest'
+        environment: 'MuleSoft-CH20-Prod' 
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: repo_deployment_scripts
+                - download: current
+                  artifact: drop
+                  patterns: "**/pom.properties"
+                - task: Bash@3
+                  displayName: "Running deployment script from repo" 
+                  inputs:
+                   # filePath: "./scripts/deployments/mulesoft_deploy_to_ch20.sh"
+                    filePath: "./cicd/mulesoft_deploy_to_ch20.sh"
+                  env:
+                    MULE_KEY: $(MULE_KEY)
+                    CONNECTED_APP_CLIENT_ID: $(CONNECTED_APP_CLIENT_ID)
+                    CONNECTED_APP_CLIENT_SECRET: $(CONNECTED_APP_CLIENT_SECRET)
+                    ANYPOINT_CLIENT_ID: $(ANYPOINT_CLIENT_ID)
+                    ANYPOINT_CLIENT_SECRET: $(ANYPOINT_CLIENT_SECRET)
+      - job: tag_release
+        displayName: Tag Release
+        dependsOn: deploy_prod
+        steps:
+          - checkout: self
+            persistCredentials: true
+          - task: Bash@3
+            displayName: "Tag Release" 
+            inputs:
+              targetType: inline
+              script: |
+                NOW="$(date +"%m/%d/%Y")"
+                git config user.name "Build Agent"
+                git config user.email "azure-cicd@connectweave.com"                      
+                git tag -a Release_${{ variables.POM_VERSION }} -m "Released to Production on $NOW"
+                git push origin Release_${{ variables.POM_VERSION }} -q
