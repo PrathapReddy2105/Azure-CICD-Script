@@ -1,0 +1,29 @@
+resources:
+  repositories:
+  - repository: repo_pipeline_templates
+    type: git    
+    name: AppDev/Mulesoft
+    ref: refs/heads/release/intialdemo
+
+trigger:
+  branches:
+    include:
+    - develop
+    - release/*
+  
+pr:
+  branches:
+    include:
+    - main
+    - release/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+extends: 
+  template: cicd/mulesoft-ch20-base-pipeline.yml@repo_pipeline_templates
+  parameters:
+    appName: 'sample-demo-poc4'
+    stage_vCores: 0.1
+    prod_vCores: 0.1
+
